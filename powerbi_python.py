@@ -9,9 +9,16 @@ Original file is located at
 
 !pip install xlsxwriter
 
+!pip install folium
+
 import polars as pl
 import xlsxwriter
 import pandas as pd
+import folium
+import os
+import requests
+import statistics
+import numpy as np
 
 boletim = pl.read_csv('boletim.csv', separator=';')
 display(boletim.head(6))
@@ -33,15 +40,132 @@ display(boletim.head(6))
 # Use pl.write_excel to export to Excel
 boletim.write_excel('boletim.xlsx', include_header=True)
 
-vendas = pd.read_csv('baseaula2.csv', separator=';')
+vendas = pd.read_csv('baseaula2.csv', sep=';')
 print(vendas.columns)
 
-# Converter Data da Coleta para date
-vendas['Data_Pedido'] = pd.to_datetime(vendas['Data_Pedido'], format='%d/%m/%Y')
+# Converter Data da Coleta para date and Valor de Venda to float
+vendas['Data_Pedido']=pd.to_datetime(vendas['Data_Pedido'], format='%d/%m/%Y')
+# Ensure the column is string type before using .str accessor
+vendas['Total_Vendas'] = vendas['Total_Vendas'].astype(str).str.replace(',', '.')
+# Now convert to float and round
+vendas['Total_Vendas'] = round(vendas['Total_Vendas'].astype(float),2)
 
-#Converter valoor de venda para float
-vendas['Valor de Venda'] = vendas['Valor de Venda'].str.replace(',', '.').astype(float)
+vendas['Total_Final'] = round(vendas['Total_Vendas']*vendas['Quantidade'],2)
+vendas['Desconto'] = round(vendas['Total_Vendas']*0.1,2)
+vendas['Lucro'] = round(vendas['Total_Final']*1.8,2)
+vendas['Valor_Total'] = round(vendas['Total_Final']-vendas['Desconto'],2)
+
+vendas['Prioridade'] = [
+    'Crítica' if quantidade < 5 else
+    'Baixa' if 5 <= quantidade < 10 else
+    'Média' if 10 <= quantidade < 15 else
+    'Alta' for quantidade in vendas['Quantidade']
+]
 
 display(vendas.head(51291))
 
 #Pergunta 1 - Qual o valor total vendido?
+total_vendido = round(vendas['Valor_Total'].sum(),2)
+print(f'O valor total vendido foi de R${total_vendido}')
+
+#Pergunta 2 - Quantas vendas foram realizadas por categoria de produto?
+categoria = vendas['Categoria'].unique()
+print(categoria)
+print('\n')
+
+# Calculate the counts for each category
+category_counts = vendas['Categoria'].value_counts()
+
+qtd_tecnologia = category_counts.get('Tecnologia', 0) # Use .get() to avoid KeyError if category is not present
+qtd_moveis = category_counts.get('Moveis', 0)
+qtd_suprimentos = category_counts.get('Suprimentos', 0)
+
+qtd_categoria = {
+    'Categoria': ['Tecnologia', 'Moveis', 'Suprimentos'],
+    'Qtd_Vendas': [qtd_tecnologia, qtd_moveis, qtd_suprimentos]
+}
+qtd_categoria_df = pd.DataFrame(qtd_categoria)
+display(qtd_categoria_df.head())
+
+# Pergunta 3 - Quantas vendas foram realizadas por país considerando a prioridade de entrega?
+pais = vendas['Pais'].unique()
+print(pais)
+
+# Calculate the counts for each country and priority combination
+# Group by 'Pais' and 'Prioridade' and count the occurrences
+category_pais = vendas.groupby(['Pais', 'Prioridade']).size().reset_index(name='Qtd_Vendas')
+
+# Display the resulting DataFrame
+display(category_pais.head(600))
+
+#Pergunta 4 - Qual foi a média de desconto nas vendas por subcategoria de produto?
+
+desconto = vendas.groupby('SubCategoria')['Desconto'].mean().round(2)
+display(desconto.head(20))
+
+# Pergunta 5 - Quais países tiveram maior média de valor de venda? Demonstre em um mapa.
+
+TopMediaVenda = {
+    'Média Vendas': vendas.groupby('Pais')['Valor_Total'].mean().sort_values(ascending=False).round(2)
+}
+TopMediaVenda = pd.DataFrame(TopMediaVenda)
+
+# Reset the index so 'Pais' becomes a regular column
+TopMediaVenda = TopMediaVenda.reset_index()
+
+display(TopMediaVenda.head(20))
+
+country_geo = 'world-countries.json'
+geojson_url = 'https://raw.githubusercontent.com/python-visualization/folium/main/examples/data/world-countries.json'
+
+# Check if the GeoJSON file already exists
+if not os.path.exists(country_geo):
+    print(f"Downloading {country_geo}...")
+    try:
+        response = requests.get(geojson_url)
+        response.raise_for_status() # Raise an exception for bad status codes
+        with open(country_geo, 'wb') as f:
+            f.write(response.content)
+        print("Download complete.")
+    except requests.exceptions.RequestException as e:
+        print(f"Error downloading the GeoJSON file: {e}")
+        # Handle the error appropriately, perhaps skip map creation
+        country_geo = None # Set to None to prevent map creation
+
+if country_geo and os.path.exists(country_geo):
+    # Create a base map centered somewhere or on the mean coordinates of your data
+    # A reasonable starting point for a world map might be [0, 0] with a zoom level
+    m = folium.Map(location=[0, 0], zoom_start=2)
+
+    # Create a Choropleth layer
+    folium.Choropleth(
+        geo_data=country_geo, # The GeoJSON file with country boundaries
+        name='choropleth',
+        data=TopMediaVenda, # Your DataFrame with country data
+        columns=['Pais', 'Média Vendas'], # Columns from your DataFrame to use
+        key_on='feature.properties.name', # Key in the GeoJSON file that matches your 'Pais' column
+        fill_color='YlGnBu', # Color scheme
+        fill_opacity=0.7,
+        line_opacity=0.2,
+        legend_name='Média de Faturamento por País ($)' # Legend title
+    ).add_to(m)
+
+    # Add layer control to the map (optional)
+    folium.LayerControl().add_to(m)
+
+    # Display the map
+    display(m)
+else:
+    print("Could not create the map because the GeoJSON file was not found or downloaded.")
+
+# %%
+
+#Pergunta 6 - Quais países tiveram maiores vendas na categoria Móveis?
+movel = vendas['Categoria'] == 'Moveis'
+
+TopMoveis = {
+    'Faturamento': vendas[movel].groupby('Pais')['Valor_Total'].sum().sort_values(ascending=False)
+}
+TopMoveis = pd.DataFrame(TopMoveis)
+display(TopMoveis.head(20))
+
